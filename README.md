@@ -10,8 +10,8 @@
                                                                      
 ```
 
-**Just For Fun! Plausible-deniability steganographic scatter tool.**<br>
-*AES-256-GCM per-chunk | PBKDF2-HMAC-SHA256 | scattered placement in pre-randomized containers.*
+**Just For Fun! Plausible-deniability steganographic scatter tool**<br>
+*AES-256-GCM per-chunk | PBKDF2-HMAC-SHA256 | scattered placement in pre-randomized containers*
 
 <br>
 
@@ -21,7 +21,7 @@
 ![Platform](https://img.shields.io/badge/platform-linux-lightgrey?style=flat-square)
 ![Arch](https://img.shields.io/badge/arch-amd64-orange?style=flat-square)
 ![Cipher](https://img.shields.io/badge/cipher-AES--256--GCM-blueviolet?style=flat-square)
-![KDF](https://img.shields.io/badge/KDF-PBKDF2%20600k-red?style=flat-square)
+![KDF](https://img.shields.io/badge/KDF-PBKDF2-red?style=flat-square)
 ![Build](https://img.shields.io/badge/build-static%20musl-informational?style=flat-square)
 
 <br>
