@@ -8,61 +8,111 @@
      _|_|  _|        _|    _|    _|      _|      _|        _|        
  _|_|_|      _|_|_|    _|_|_|      _|_|    _|_|    _|_|_|  _|        
                                                                      
-                                                                                            
 ```
 
-**Just For Fun! Plausible-deniability steganographic scatter tool**<br>
-*AES-256-GCM | PBKDF2-HMAC-SHA256*
+**Just For Fun! Plausible-deniability steganographic scatter tool.**<br>
+*AES-256-GCM per-chunk | PBKDF2-HMAC-SHA256 | scattered placement in pre-randomized containers.*
 
 <br>
 
 ![Version](https://img.shields.io/badge/version-2.1.0-blue?style=flat-square)
+![C](https://img.shields.io/badge/C-11-A8B9CC?style=flat-square&logo=c&logoColor=white)
+![License](https://img.shields.io/badge/license-MIT-green?style=flat-square)
+![Platform](https://img.shields.io/badge/platform-linux-lightgrey?style=flat-square)
+![Arch](https://img.shields.io/badge/arch-amd64-orange?style=flat-square)
+![Cipher](https://img.shields.io/badge/cipher-AES--256--GCM-blueviolet?style=flat-square)
+![KDF](https://img.shields.io/badge/KDF-PBKDF2%20600k-red?style=flat-square)
+![Build](https://img.shields.io/badge/build-static%20musl-informational?style=flat-square)
+
 <br>
+
+[installation](#installation) •
+[usage](#usage) •
+[cryptographic architecture](#cryptographic-architecture) •
+[file formats](#file-formats) •
+[all flags](#all-flags) •
+[threat model](#threat-model)
 
 </div>
 
-`scatter` takes one or more files, encrypts each with AES-256-GCM, splits
-the ciphertext into variable-length fragments, and hides those fragments
-at pseudo-random offsets inside a larger container — typically a USB
-stick or disk image pre-filled with `/dev/urandom`.
+`scatter` takes one or more files, encrypts each with **AES-256-GCM**, splits
+the ciphertext into variable-length fragments, and hides those fragments at
+pseudo-random offsets inside a larger container — typically a USB stick or
+disk image pre-filled with `/dev/urandom`. If the container was pre-randomized,
+the encrypted fragments are indistinguishable from the surrounding noise
+without the map/ops file **and** the password.
 
----
+-----
 
-## Features
+## Cryptographic architecture
 
-- **AES-256-GCM** per-chunk encryption, 128-bit authentication tag.
-- **PBKDF2-HMAC-SHA256**, 600 000 iterations, per-payload 128-bit salt.
-- **Multiple payloads per container**, non-overlapping, each with its own salt.
-- **Configurable** chunk size, gap size, and head/tail skip zones.
-- **Plain-text map** (`0x00ab34...` offsets, chunk lengths, SHA-256 per chunk).
-- **Minimal ops file** — trivial one-letter-per-record format for custom tooling.
-- **Audit mode** — re-verify SHA-256 of every chunk on disk without the password.
-- **Block devices** and regular files supported.
-- **Static musl build** with zero runtime dependencies.
-- **Non-interactive**: password via `-p STRING` or `-P FILE`, no TTY prompt.
-
----
-
-## Build
-
-### Requirements
-
-- C11 compiler (`gcc` ≥ 9 or `clang` ≥ 10)
-- OpenSSL ≥ 1.1 (headers + libcrypto)
-- GNU Make
-- Linux 2.6+ (uses `BLKGETSIZE64`; a fallback is provided so
-  `linux/fs.h` / kernel-headers are *not* required for musl builds)
-
-### Dynamic (release)
-
-```bash
-make
-sudo make install          # /usr/local/bin/scatter
+```text
+Password
+    │
+    ▼
+┌─────────────────────────────────────────────┐
+│  PBKDF2-HMAC-SHA256 (600 000 iterations)   │
+│  salt: 16 random bytes PER PAYLOAD          │
+└──────────────┬──────────────────────────────┘
+               │ 256-bit key (unique per payload)
+               ▼
+       ┌───────┴────────┐
+       │  AES-256-GCM    │
+       │  IV = salt[0..7] ‖ be32(chunk_id)
+       └───────┬────────┘
+               │
+    ┌──────────┼──────────┬──────────┐
+    ▼          ▼          ▼          ▼
+ chunk 0    chunk 1    chunk 2    chunk N     ← variable length [min..max]
+ + tag 16B  + tag 16B  + tag 16B  + tag 16B
+    │          │          │          │
+    ▼          ▼          ▼          ▼
+ ┌────────────────────────────────────┐
+ │  scattered into the container      │
+ │  at pseudo-random offsets,         │
+ │  non-overlapping, random gaps,     │
+ │  skipping head/tail zones          │
+ └────────────────────────────────────┘
 ```
 
-Produces a stripped, hardened PIE with no BuildID note.
+### Per-chunk flow
 
-### Static musl (zero runtime deps)
+Each chunk is encrypted with a unique 96-bit IV derived from the payload's
+random salt and the chunk's sequential ID, so IVs never repeat within a payload
+and never collide across payloads (different salt → different key). The 128-bit
+GCM tag is appended and the whole `ciphertext‖tag` block is fingerprinted with
+SHA-256, which is recorded in the map for password-less integrity auditing.
+
+### Layout engine
+
+Chunk lengths are uniformly sampled from `[min_chunk, max_chunk]` with
+rejection sampling (no modulo bias). Placement is random-with-retry inside
+`[skip_head, container_size - skip_tail]`, rejecting any candidate whose
+expansion by `[min_gap, max_gap]` overlaps an existing reservation. Chunks
+from different payloads share the same reservation list, so they cannot
+collide either.
+
+### Why it looks like noise
+
+AES-GCM ciphertext + tag is the output of a PRF keyed by a secret. Without the
+key it is statistically indistinguishable from uniform random bytes — Shannon
+entropy, χ², NIST SP 800-22 all agree. No magic bytes, no headers, no padding
+are written into the container.
+
+## Installation
+
+### From source (dynamic, system OpenSSL)
+
+```bash
+git clone https://github.com/cyberanchor/scatter
+cd scatter
+make
+sudo make install          # → /usr/local/bin/scatter
+```
+
+Produces a **stripped, hardened PIE with no BuildID note**.
+
+### Static musl build (zero runtime deps)
 
 One-time: build a static OpenSSL under `/usr/local/musl`:
 
@@ -82,6 +132,9 @@ file scatter-static
 # scatter-static: ELF 64-bit LSB executable, statically linked, stripped
 ```
 
+Kernel headers are **not required** — `scatter` provides a fallback
+`BLKGETSIZE64` definition so musl builds work out of the box.
+
 ### Debug build (ASan + UBSan)
 
 ```bash
@@ -89,123 +142,65 @@ make debug
 ./scatter-debug pack ...
 ```
 
----
+### Make targets
 
-## Quick start
+| Target | Description |
+|---|---|
+| `make` | Release build (dynamic, stripped, no BuildID) |
+| `make static-musl` | Fully static musl binary, zero runtime deps |
+| `make debug` | ASan + UBSan instrumented build |
+| `make test` | Run integration self-test |
+| `make dist` | Produce `scatter-$(VERSION).tar.gz` |
+| `make install` | Install to `$(PREFIX)/bin` |
+| `make clean` | Remove build artifacts |
+
+## Usage
+
+### Prepare the container (one-time)
 
 ```bash
-# 1. Fill the container with random bytes (once, by you — scatter won't do it).
 sudo dd if=/dev/urandom of=/dev/sdb bs=4M status=progress
+```
 
-# 2. Store the password on tmpfs.
+`scatter` does **not** fill the container for you — by design.
+
+### Pack files into a container
+
+```bash
 umask 077
 printf '%s' 'correct horse battery staple' > /run/user/$UID/pw
 
-# 3. Pack three files onto the USB stick.
 scatter pack \
-    -c /dev/sdb \
-    -m sdb.map          \
-    --ops sdb.ops        \
-    -P /run/user/$UID/pw \
+    -c /dev/sdb           \
+    -m sdb.map            \
+    --ops sdb.ops         \
+    -P /run/user/$UID/pw  \
     -- secret.zip notes.md photo.jpg
 
-# 4. Verify integrity any time later (no password needed).
-scatter audit -m sdb.map -c /dev/sdb
-
-# 5. Restore.
-scatter unpack -c /dev/sdb -m sdb.ops -O ./restored -P /run/user/$UID/pw
-
-# 6. Wipe the on-disk password.
 shred -u /run/user/$UID/pw
 ```
 
----
-
-## Command reference
-
-### `pack`
-
-Encrypt the given files and scatter them across the container.
-
-```
-scatter pack  -c CONTAINER  -m MAP  [--ops OPS]  -p PASS | -P FILE
-              [--skip-head N] [--skip-tail N]
-              [--min-chunk N] [--max-chunk N]
-              [--min-gap N]   [--max-gap N]
-              -- FILE [FILE ...]
-```
-
-| Flag | Default | Purpose |
-|---|---|---|
-| `-c, --container` |  | Target (regular file or block device) |
-| `-m, --map`       |  | Rich, human-readable map file |
-| `--ops`           |  | Optional minimal ops file for production decoders |
-| `-p, --password`  |  | Password literal (visible in `ps`) |
-| `-P, --password-file` |  | Read password from a file (first line, CRLF stripped) |
-| `--skip-head`     | 10    | Bytes to leave untouched at start of container |
-| `--skip-tail`     | 10    | Bytes to leave untouched at end of container |
-| `--min-chunk`     | 4096  | Minimum chunk (plaintext) size |
-| `--max-chunk`     | 262144| Maximum chunk size |
-| `--min-gap`       | 4096  | Minimum inter-chunk gap |
-| `--max-gap`       | 65536 | Maximum inter-chunk gap |
-
-### `unpack`
-
-```
-scatter unpack  -c CONTAINER  -m MAP|OPS  -p PASS | -P FILE
-                [-O DIR]  [-n NAME]
-```
-
-`-m` accepts either a map file or an ops file — scatter auto-detects.
-
-### `audit`
-
-```
-scatter audit  -m MAP|OPS  [-c CONTAINER]
-```
-
-Verifies chunk topology and (if `-c` is given) SHA-256 of every chunk on
-the container. No password required.
-
----
-
-## Password handling & shell escaping
-
-Passwords are passed to PBKDF2 as raw bytes. Scatter does not escape,
-normalize, or trim anything — except that the *file* form strips a
-trailing `\r\n` from the first line.
-
-| Method | Visible to other users? | Notes |
-|---|---|---|
-| `-p 'literal'`  | **Yes** — `/proc/<pid>/cmdline`, shell history | Fine for scripts and testing |
-| `-P file`       | Only if file is readable  | **Preferred**; put on tmpfs, `shred` after |
-
-Shell quoting rules (your shell, not scatter):
+### Audit a container (no password needed)
 
 ```bash
-# Safe — literal, no expansion:
-scatter pack -p 'my$weird"pa ss' ...
-
-# Dangerous — $, `, \, ! still expand in double quotes:
-scatter pack -p "my$weird"       ...     # $weird expands!
-
-# Literal single quote:
-scatter pack -p 'it'\''s fine'   ...
-
-# Completely shell-agnostic:
-printf '%s' 'any "$bytes" are fine' > pw
-scatter pack -P pw ...
+scatter audit -m sdb.map -c /dev/sdb
 ```
 
-The integration test (`test_scatter.sh`) round-trips passwords
-containing `$`, `'`, `"`, space, backtick, backslash, `!`, UTF-8
-(`пароль-日本語-🔑`), and embedded `\t` / `\n` / `\x01` — all pass.
+### Restore payloads
 
----
+```bash
+scatter unpack -c /dev/sdb -m sdb.ops -O ./restored -P /run/user/$UID/pw
+```
+
+### Restore just one payload
+
+```bash
+scatter unpack -c /dev/sdb -m sdb.ops -O ./restored -P pw -n secret.zip
+```
 
 ## File formats
 
-### Map file (human-readable)
+### Map file — human-readable layout & audit view
 
 ```text
 # scatter map v2 — human-readable layout & audit file
@@ -218,18 +213,11 @@ skip_head=10
 skip_tail=10
 created=2026-04-17T14:24:56Z
 
-# -- aggregate statistics (informational, not parsed on read) --
+# -- aggregate statistics --
 # payload_count=3
 # total_chunks=63
-# total_plaintext_bytes=1114590
-# total_ciphertext_bytes=1115598
 # container_usage=0.014%
-# earliest_offset=0x0000153f5e
-# latest_end=0x000003d16bfb
 
-# ------------------------------------------------------------
-# payload 1 / 3: secret.zip
-# ------------------------------------------------------------
 [payload]
 name=secret.zip
 original_size=1048576
@@ -238,111 +226,109 @@ pbkdf2_iterations=600000
 cipher=aes-256-gcm
 iv_scheme=salt8_be_chunkid4
 chunk_count=57
-# min_plaintext_chunk=4096
-# max_plaintext_chunk=32768
 # id        offset        length   sha256(ciphertext||tag)
 00000000  0x0002dc320d  00011242 e6b6db8ae0c40371c5886236f4b36def40648cc26a123ae55b49342588cbbdf3
 00000001  0x000371fedc  00009039 193fb37f41a2c08315e2efbc836dee4da8f65750160c5f95bc0e11d45438a671
-...
 # end of payload secret.zip (57 chunks)
 ```
 
-### Ops file (machine-parseable)
+### Ops file — minimal machine-parseable
 
-One record per line: `<tag> <value>`.
+One record per line, `<tag> <value>`. Trivial to parse from any language.
 
 ```text
-# scatter ops v1
-V 1
-C /dev/sdb
-S 8053063680
-H 10
-T 10
-P secret.zip
-N 1048576
-K 77d3f2df6295e2a8ea7f97ba7005ffc0
-I 600000
-O 0x0002dc320d
-L 11242
-D e6b6db8ae0c40371c5886236f4b36def40648cc26a123ae55b49342588cbbdf3
-O 0x000371fedc
-L 9039
-D 193fb37f41a2c08315e2efbc836dee4da8f65750160c5f95bc0e11d45438a671
-...
-E secret.zip
+V 1                ← format version
+C /dev/sdb         ← container path
+S 8053063680       ← container size
+H 10               ← skip head
+T 10               ← skip tail
+P secret.zip       ← payload begin
+N 1048576          ← original size
+K 77d3f2df...      ← salt (16 bytes hex)
+I 600000           ← PBKDF2 iterations
+O 0x0002dc320d     ← chunk offset
+L 11242            ← chunk length
+D e6b6db8a...      ← sha256 of ciphertext‖tag
+E secret.zip       ← payload end
 ```
 
-Tags: `V`ersion, `C`ontainer, `S`ize, skip-`H`ead, skip-`T`ail,
-`P`ayload-begin, `N`ame-size, salt (`K`ey-material),
-`I`terations, `O`ffset, `L`ength, `D`igest, `E`nd-payload.
+`unpack` and `audit` auto-detect map vs ops format — use whichever you prefer.
 
+## Password handling
 
----
+Passwords are passed to PBKDF2 as raw bytes. `scatter` does no escaping or
+normalization — shell quoting is your responsibility.
 
-## Cryptographic details
+| Method | Visible to other users? | Notes |
+|---|---|---|
+| `-p 'literal'` | **Yes** — via `/proc/<pid>/cmdline`, shell history | Fine for scripts/testing |
+| `-P file` | Only if file is readable | **Preferred**; put on tmpfs, `shred` after |
 
-| Item | Value |
-|---|---|
-| KDF            | PBKDF2-HMAC-SHA256, 600 000 iterations |
-| Salt           | 16 random bytes per payload (not per run) |
-| Key            | 256 bits, unique per payload |
-| Cipher         | AES-256-GCM |
-| IV             | 96 bits = `salt[0..7] ‖ be32(chunk_id)` |
-| Tag            | 128 bits, appended to ciphertext |
-| Integrity note | SHA-256 over `ciphertext ‖ tag`, recorded in map/ops |
+```bash
+# Safe — single quotes, no expansion:
+scatter pack -p 'my$weird"pa ss' ...
 
-**IV uniqueness.** Within one payload, `chunk_id` is unique. Across
-payloads sharing a password, the *key* differs (different salt), so
-identical `(salt_prefix, chunk_id)` pairs are not a reuse in the
-cryptographic sense.
+# Shell-agnostic — use -P:
+printf '%s' 'any "$bytes" are fine' > pw
+scatter pack -P pw ...
+```
 
----
+The integration test round-trips passwords containing `$`, `'`, `"`, space,
+backtick, backslash, `!`, UTF-8 (`пароль-日本語-🔑`), and embedded
+`\t` / `\n` / `\x01` — all pass.
+
+## All flags
+
+| Flag | Mode | Description |
+|---|---|---|
+| `pack` | — | Encrypt files and scatter into a container |
+| `unpack` | — | Decrypt and restore payloads |
+| `audit` | — | Verify topology and SHA-256 of chunks on disk |
+| `-c, --container PATH` | pack/unpack | Container file or block device |
+| `-m, --map PATH` | all | Map file (pack writes, unpack/audit read) |
+| `--ops PATH` | pack | Also emit a machine-parseable ops file |
+| `-p, --password PASS` | pack/unpack | Password literal (visible in `ps`) |
+| `-P, --password-file FILE` | pack/unpack | Read password from file |
+| `-O, --output-dir DIR` | unpack | Where to write restored payloads |
+| `-n, --name NAME` | unpack | Only restore payload with this name |
+| `--skip-head N` | pack | Bytes to leave untouched at start (default 10) |
+| `--skip-tail N` | pack | Bytes to leave untouched at end (default 10) |
+| `--min-chunk N` | pack | Min chunk size (default 4096) |
+| `--max-chunk N` | pack | Max chunk size (default 262144) |
+| `--min-gap N` | pack | Min inter-chunk gap (default 4096) |
+| `--max-gap N` | pack | Max inter-chunk gap (default 65536) |
+| `-v, --verbose` | all | Increase log verbosity (repeatable) |
+| `-q, --quiet` | all | Warnings and errors only |
+| `--no-color` | all | Disable ANSI colors |
+| `-h, --help` | — | Show help |
+| `-V, --version` | — | Show version |
 
 ## Threat model
 
 | Adversary capability | Protected? |
 |---|---|
 | Sees only the container, no map, no password | ✅ Ciphertext indistinguishable from pre-filled urandom |
-| Has the map/ops file but not the password    | Partial — must brute-force PBKDF2; use a strong password |
-| Has the password but not the map             | Must scan the whole container for GCM-valid frames; costly but not impossible |
-| Has both                                     | ❌ Everything recoverable (by design) |
-| Physically tampered with the container       | ✅ Detected by `audit` via SHA-256 |
-| Coercion ("decrypt or else")                 | ❌ Not deniable encryption; just obscurity |
+| Has the map/ops file but not the password | Partial — must brute-force PBKDF2; use a strong password |
+| Has the password but not the map | Must scan the whole container for GCM-valid frames; costly but not impossible |
+| Has both | ❌ Everything recoverable (by design) |
+| Physically tampered with the container | ✅ Detected by `audit` via SHA-256 |
+| Coercion ("decrypt or else") | ❌ Not deniable encryption; just obscurity |
 
 Keep the map/ops file **physically separate** from the container.
 
----
+## Limitations
 
-## Limitations and design notes
-
-- scatter does **not** wipe/fill the container. Do it once with `dd`.
-- One container ↔ one map. Running `pack` twice on the same container
-  with two different maps will overwrite chunks from the first pack.
-  (An `--append-to=old.map` mode is a possible future addition.)
+- `scatter` does **not** wipe/fill the container. Do it once with `dd`.
+- One container ↔ one map. Running `pack` twice on the same container with
+  two different maps will overwrite chunks from the first pack.
 - No TTY password prompt — use `-p` or `-P`. This is intentional for
-  scripting/automation.
-- Container must hold a few ×  payload size to find non-overlapping
-  slots with gaps. A 1 MiB payload in a 2 MiB container will likely
-  abort with "container too small or fragmented".
-- Max chunk size is capped at 16 MiB by `HARD_MAX_CHUNK`.
+  scripting and automation.
+- Container must hold a few × payload size to find non-overlapping slots with
+  gaps. A 1 MiB payload in a 2 MiB container will likely abort with
+  "container too small or fragmented".
+- Max chunk size is capped at 16 MiB.
 
----
+## Disclaimer
 
-## Testing
-
-```bash
-make test
-```
-
-Runs `test_scatter.sh`, which packs three payloads (1 MiB / 66 KB / 14 B),
-audits and unpacks via both map and ops, verifies tamper detection,
-wrong-password rejection, dual-password-flag rejection, and eight
-special-character password round-trips.
-
-AddressSanitizer / UndefinedBehaviorSanitizer:
-
-```bash
-make debug
-ASAN_OPTIONS=detect_leaks=1 UBSAN_OPTIONS=halt_on_error=1 \
-    ./scatter-debug pack -c cont -m map -P pw -- file1 file2
-```
+`scatter` is intended exclusively for personal, lawful use. The author is
+not responsible for any misuse of this software.
